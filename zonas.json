@@ -1,0 +1,9 @@
+{
+  "atualizado": "2026-06-11",
+  "fonte": "Valores iniciais (idealista). Serão substituídos por dados INE na primeira execução da Action.",
+  "nota": "",
+  "zonas": [
+    { "id": "mafra", "nome": "Mafra (vila)", "m2": 2899, "var": 5.7, "ref": "idealista abr 2026" },
+    { "id": "torresvedras", "nome": "Torres Vedras", "m2": 2277, "var": 5.1, "ref": "idealista mai 2026" }
+  ]
+}
