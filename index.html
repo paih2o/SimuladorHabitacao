@@ -1497,6 +1497,7 @@ function saveState() {
   $('saveStatus').textContent = 'A guardar…';
   const state = { mode, euriborIdx, regimeIRS, titulares, ivaAgencia, investMode, reinvOpt, aIvaAgencia, mvAStatus, jovemIMT, aTitulares, showDetails, realMode, zonas, zonaBIdx, zonaCIdx };
   PERSISTED_FIELDS.forEach(id => { const el=$(id); if (el) state[id]=el.value; });
+  if ($('invAnosSl')) state.invAnos = $('invAnosSl').value;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     setTimeout(()=>{
@@ -1534,6 +1535,7 @@ function loadState() {
       const sl=$(id+'Sl'), inp=$(id);
       if (sl && inp) sl.value=Math.min(Math.max(parseFloat(inp.value)||0, parseFloat(sl.min)), parseFloat(sl.max));
     });
+    if (s.invAnos !== undefined && $('invAnosSl')) $('invAnosSl').value = s.invAnos;
     return true;
   } catch { return false; }
 }
@@ -1544,16 +1546,270 @@ function resetData() {
   location.reload();
 }
 
-function exportData() {
-  const state = { mode, euriborIdx, regimeIRS, titulares, ivaAgencia, investMode, reinvOpt };
-  PERSISTED_FIELDS.forEach(id => { const el=$(id); if (el) state[id]=el.value; });
-  const blob = new Blob([JSON.stringify(state, null, 2)], { type:'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `simulador-${new Date().toISOString().slice(0,10)}.json`;
-  a.click();
-  toast('Exportado');
+// ═══════════════════════════════════════════════════════
+// EXPORTAÇÃO COMPLETA (v2) — inclui todos os campos e opções persistidos,
+// o estado bruto guardado no navegador e um resumo estruturado para outras apps.
+// Não altera nem apaga dados guardados.
+// ═══════════════════════════════════════════════════════
+const OPCOES_PREDEFINIDAS = {
+  mode:'fixa', euriborIdx:'12', regimeIRS:'hpp', titulares:1, ivaAgencia:true,
+  investMode:'acoes', reinvOpt:'total', aIvaAgencia:true, mvAStatus:'liquidadas',
+  jovemIMT:false, aTitulares:1, showDetails:true, realMode:false, zonaBIdx:1, zonaCIdx:0
+};
+
+function buildExportPayload() {
+  const r2 = v => (v === null || v === undefined || !isFinite(v)) ? null : Math.round(v * 100) / 100;
+
+  // Lê um campo e compara com o valor predefinido no código.
+  // Se for igual ao predefinido, "valor" fica null (não confirmado como introduzido).
+  const campo = (id, unidade, elId) => {
+    const el = $(elId || id);
+    if (!el) return { id, valor:null, valor_no_ecran:null, valor_predefinido_codigo:null, estado:'campo_inexistente', unidade:unidade||null };
+    const v = parseFloat(el.value), d = parseFloat(el.defaultValue);
+    const temV = isFinite(v), temD = isFinite(d);
+    const igual = temV && temD && v === d;
+    return {
+      id,
+      valor: (!temV || igual) ? null : v,
+      valor_no_ecran: temV ? v : null,
+      valor_predefinido_codigo: temD ? d : null,
+      estado: !temV ? 'desconhecido' : (igual ? 'predefinido_por_confirmar' : 'introduzido_pelo_utilizador'),
+      unidade: unidade || null
+    };
+  };
+  const opcao = (nome, valor) => ({
+    id: nome, valor,
+    valor_predefinido_codigo: OPCOES_PREDEFINIDAS[nome],
+    estado: (valor === OPCOES_PREDEFINIDAS[nome]) ? 'predefinido_por_confirmar' : 'escolhido_pelo_utilizador'
+  });
+  const naoExiste = (unidade, nota) => ({ valor:null, estado:'nao_existe_no_simulador', unidade:unidade||null, nota:nota||null });
+  const est = (v, unidade, nota) => ({ valor:r2(v), estado:'estimativa_simulador', unidade:unidade||null, nota:nota||null });
+  const num = id => { const el = $(id); const v = el ? parseFloat(el.value) : NaN; return isFinite(v) ? v : 0; };
+
+  // ── Estado bruto exatamente como está guardado no navegador ──
+  let bruto = null;
+  try { const raw = localStorage.getItem(STORAGE_KEY); bruto = raw ? JSON.parse(raw) : null; } catch { bruto = null; }
+
+  // ── Estado completo atual (todas as opções + todos os campos, ids originais) ──
+  const estado = { mode, euriborIdx, regimeIRS, titulares, ivaAgencia, investMode, reinvOpt,
+    aIvaAgencia, mvAStatus, jovemIMT, aTitulares, showDetails, realMode, zonas, zonaBIdx, zonaCIdx };
+  PERSISTED_FIELDS.forEach(id => { const el = $(id); if (el) estado[id] = el.value; });
+  estado.invAnos = $('invAnosSl') ? $('invAnosSl').value : null;
+
+  const campos = {};
+  PERSISTED_FIELDS.forEach(id => { campos[id] = campo(id, null, id === 'invAnos' ? 'invAnosSl' : null); });
+  const opcoes = {};
+  Object.keys(OPCOES_PREDEFINIDAS).forEach(k => { opcoes[k] = opcao(k, estado[k]); });
+
+  // ── Cálculos do simulador (mesmas funções usadas no ecrã) ──
+  updateVenda();
+  const venda = num('vVenda'), divida = num('vDivida'), aqB = num('vAquisicao');
+  const anoAqB = parseInt($('vAnoAq').value) || null, obrasB = num('vObras'), capExtra = num('vCapExtra');
+  const cv = calcCustosVenda();
+  const custAqB = calcCustosAquisicao(aqB);
+  const coefB = anoAqB ? getCoef(anoAqB) : null;
+  const aqCorrB = aqB * (coefB || 1) + custAqB.total;
+  const mvB = venda - aqCorrB - obrasB - cv.totalCust;
+  const denom = Math.max(0, venda - divida - cv.totalCust);
+  const optA = calcReinvForOption('total', mvB, denom);
+  const optB = calcReinvForOption('conserv', mvB, denom);
+  const sel = reinvOpt === 'total' ? optA : optB;
+  const produtoBruto = venda - cv.totalCust - divida;
+  const irsA = (mvAStatus === 'apagar') ? (window._irsAEstimado || 0) : 0;
+  const totalDisp = window._totalDisp || 0;
+
+  const nImovel = num('nImovel'), entrada = num('capital'), nObras = num('nObras');
+  const credito = Math.max(0, nImovel - entrada);
+  const custAqC = calcCustosAquisicaoC(nImovel);
+  const prazo = num('prazo'), tan = getTAN(), seg = getSeguros();
+  const prest = calcPrest(credito, Math.round(prazo * 12), tan);
+  const remanescente = totalDisp - entrada - nObras - custAqC.total;
+  const inv = getInvestReturns();
+
+  const zB = (Array.isArray(zonas) && zonas[zonaBIdx]) ? zonas[zonaBIdx] : null;
+  const zC = (Array.isArray(zonas) && zonas[zonaCIdx]) ? zonas[zonaCIdx] : null;
+
+  const usadosPorDefeito = Object.values(campos).filter(c => c.estado === 'predefinido_por_confirmar').map(c => c.id);
+
+  return {
+    meta: {
+      formato: 'simulador-habitacao.export', versao_formato: 2,
+      exportado_em: new Date().toISOString(),
+      origem: location.origin + location.pathname,
+      chave_armazenamento: STORAGE_KEY,
+      dados_guardados_encontrados: bruto !== null,
+      legenda_estados: {
+        introduzido_pelo_utilizador: 'valor diferente do predefinido no código; foi introduzido no simulador (pode ser real ou uma estimativa do próprio utilizador)',
+        escolhido_pelo_utilizador: 'opção diferente da predefinida',
+        predefinido_por_confirmar: 'igual ao valor de exemplo do código; valor fica null até confirmação',
+        estimativa_simulador: 'calculado pelo simulador; não é valor fiscal definitivo',
+        pressuposto: 'constante ou tabela usada no cálculo',
+        nao_existe_no_simulador: 'dado pedido que o simulador não recolhe'
+      },
+      aviso: 'Estimativas fiscais indicativas. Não substituem a liquidação da AT nem aconselhamento profissional.'
+    },
+    estado_persistido_bruto: bruto,
+    estado_completo_atual: estado,
+    campos, opcoes,
+    campos_com_valor_predefinido: usadosPorDefeito,
+
+    operacoes_historicas: {
+      imovel_A: {
+        aquisicao: { preco: campos.aAquisicao, ano: campos.aAnoAq, data: naoExiste('AAAA-MM-DD'),
+          custos_aquisicao_auto: est(calcCustosAquisicao(num('aAquisicao')).total, 'EUR', 'IMT HPP + selo 0,8% + notário 600 (estimativa)') },
+        obras_documentadas: campos.aObras,
+        venda: { preco: campos.aVenda, ano: campos.aAnoVenda, data: naoExiste('AAAA-MM-DD'),
+          divida_liquidada: campos.aDivida, comissao_percentagem: campos.aComissao,
+          iva_sobre_comissao: opcoes.aIvaAgencia, outras_despesas: campos.aOutrosCustos },
+        reinvestido_em_B: campos.aReinvB,
+        rendimento_anual_ano_venda: campos.aRendAno,
+        titulares: opcoes.aTitulares,
+        estado_irs: opcoes.mvAStatus,
+        irs_estimado_A: est(window._irsAEstimado || 0, 'EUR', 'proxy do simulador; confirmar com a nota de liquidação'),
+        irs_confirmado_A: naoExiste('EUR'),
+        percentagem_propriedade: naoExiste('%')
+      }
+    },
+
+    venda_atual_B: {
+      preco: campos.vVenda,
+      data_prevista_ou_escritura: naoExiste('AAAA-MM-DD'),
+      divida_liquidada: campos.vDivida,
+      comissao_percentagem: campos.vComissao,
+      iva_sobre_comissao: opcoes.ivaAgencia,
+      comissao_valor: est(cv.commVal, 'EUR'),
+      iva_valor: est(cv.ivaVal, 'EUR'),
+      outras_despesas: campos.vOutrosCustos,
+      despesas_venda_total: est(cv.totalCust, 'EUR'),
+      percentagem_propriedade: naoExiste('%', 'o simulador assume 100% do imóvel'),
+      zona: zB ? { id: zB.id, nome: zB.nome, valorizacao_anual: zB.var } : null,
+      fiscal: {
+        regime: opcoes.regimeIRS,
+        aquisicao_preco: campos.vAquisicao,
+        aquisicao_ano: campos.vAnoAq,
+        aquisicao_data: naoExiste('AAAA-MM-DD'),
+        custos_aquisicao_auto: est(custAqB.total, 'EUR', 'IMT HPP + selo 0,8% + notário 600; não substitui a escritura real'),
+        custos_aquisicao_documentados: naoExiste('EUR'),
+        obras_documentadas: campos.vObras,
+        coeficiente_monetario: { valor: coefB, estado: 'pressuposto', nota: 'Portaria 382/2025/1' },
+        valor_aquisicao_corrigido: est(aqCorrB, 'EUR'),
+        mais_valia: est(mvB, 'EUR'),
+        base_tributavel_sem_reinvestimento: est(Math.max(0, mvB) * getTributavelMultiplier(), 'EUR'),
+        rendimentos_englobamento: { titulares: opcoes.titulares, titular_1: campos.rendAnualT1, titular_2: titulares === 2 ? campos.rendAnualT2 : null },
+        reinvestimento: {
+          metodo_escolhido: opcoes.reinvOpt,
+          denominador: est(denom, 'EUR', 'venda − dívida − despesas de venda'),
+          opcao_total: { numerador: est(optA.numerador, 'EUR', 'preço C + obras C'), proporcao: est(optA.prop), irs: est(optA.irs, 'EUR') },
+          opcao_conservadora: { numerador: est(optB.numerador, 'EUR', 'entrada C + obras C'), proporcao: est(optB.prop), irs: est(optB.irs, 'EUR') }
+        },
+        irs_estimado_B: est(sel.irs, 'EUR', 'englobamento com escalões do simulador'),
+        irs_confirmado_B: naoExiste('EUR')
+      },
+      produto_antes_irs: est(produtoBruto, 'EUR', 'venda − despesas − dívida'),
+      poupancas_adicionais: campos.vCapExtra,
+      irs_A_por_pagar_deduzido: est(irsA, 'EUR'),
+      capital_disponivel_para_C: est(totalDisp, 'EUR', 'produto − IRS B − IRS A por pagar + poupanças')
+    },
+
+    compra_atual_C: {
+      preco: campos.nImovel,
+      data_prevista: naoExiste('AAAA-MM-DD'),
+      capitais_proprios_entrada: campos.capital,
+      sinal_ja_pago: naoExiste('EUR', 'se existir, deve estar incluído na entrada e não ser somado de novo'),
+      sinal_incluido_na_entrada: naoExiste(null),
+      financiamento: est(credito, 'EUR', 'preço − entrada'),
+      ltv: est(nImovel > 0 ? credito / nImovel * 100 : null, '%'),
+      isencao_jovem_ativa: opcoes.jovemIMT,
+      imt: est(custAqC.imt, 'EUR'),
+      imposto_selo_aquisicao: est(custAqC.selo, 'EUR'),
+      escritura_e_registos: est(custAqC.notario, 'EUR', 'valor fixo estimado de 600'),
+      imposto_selo_credito: naoExiste('EUR'),
+      despesas_bancarias: naoExiste('EUR', 'avaliação, dossier, comissões'),
+      percentagem_propriedade: naoExiste('%'),
+      zona: zC ? { id: zC.id, nome: zC.nome, valorizacao_anual: zC.var } : null,
+      credito: {
+        tipo_taxa: opcoes.mode, indexante_euribor_meses: opcoes.euriborIdx,
+        taxa_fixa: campos.taxaFixa, euribor: campos.euriborInp, spread: campos.spread,
+        tan_usada: est(tan, '%'), taeg: naoExiste('%'),
+        prazo_anos: campos.prazo, idade: campos.idade,
+        seguro_vida_mensal: mode === 'fixa' ? campos.segVF : campos.segVV,
+        seguro_multirriscos_mensal: mode === 'fixa' ? campos.segMF : campos.segMV,
+        rendimento_mensal_liquido: campos.rendimento, outras_prestacoes: campos.outras,
+        taxa_esforco_maxima_banco: campos.teMax,
+        prestacao_estimada_sem_seguros: est(prest, 'EUR'),
+        prestacao_estimada_com_seguros: est(prest + seg, 'EUR')
+      }
+    },
+
+    obras_poupancas_investimento: {
+      orcamento_obras_C: campos.nObras,
+      poupancas_adicionais: campos.vCapExtra,
+      reserva_liquidez: naoExiste('EUR'),
+      percentagem_para_investir: naoExiste('%', 'o simulador assume 100% do remanescente'),
+      remanescente_apos_compra: est(remanescente, 'EUR', 'capital disponível − entrada − obras − IMT/selo/escritura'),
+      cenario_investimento: opcoes.investMode,
+      percentagem_acoes: { valor: inv.pctA, estado: investMode === 'custom' ? campos.invPctAcoes.estado : 'pressuposto' },
+      retorno_acoes: { valor: inv.retA, estado: 'pressuposto', unidade: '%' },
+      retorno_imobiliario: { valor: inv.retI, estado: 'pressuposto', unidade: '%' },
+      horizonte_anos: campos.invAnos,
+      inflacao: campos.inflacao, valores_reais: opcoes.realMode,
+      liberdade_financeira: { renda_mensal: campos.lfRenda, taxa_levantamento: campos.lfTaxa },
+      amortizacao_extra_anual: campos.amortExtra, comissao_reembolso: campos.amortComissao,
+      cenario_ficar_em_B: { valorizacao_B: campos.decGB, valorizacao_C: campos.decGC, prazo_restante_B: campos.decPrazoB, tan_B: campos.decTanB }
+    },
+
+    pressupostos: {
+      ano_alienacao_assumido: 2026,
+      ano_fiscal_escaloes_irs: 2025,
+      escaloes_irs: IRS_ESCALOES.map(([lim, tx]) => ({ ate: isFinite(lim) ? lim : null, taxa: tx })),
+      percentagem_tributavel_residente: 0.5,
+      taxa_autonoma_nao_residente: 0.28,
+      coeficientes_monetarios: { fonte: 'Portaria 382/2025/1', aplica_se_apos_meses: 24, tabela: COEF_MON },
+      euribor: { data: '2026-05-07', valores: EURIBOR },
+      iva_comissao: 0.23, imposto_selo_aquisicao: 0.008, escritura_registos_fixo: 600,
+      imt_tabela: 'HPP continente 2026',
+      isencao_jovem: { idade_max_exclusive: 36, valor_max: 324058 },
+      reinvestimento: {
+        denominador: 'valor de venda − dívida liquidada − despesas de venda',
+        opcao_total: 'preço do novo imóvel + obras',
+        opcao_conservadora: 'capitais próprios (entrada) + obras'
+      },
+      zonas: zonas
+    },
+
+    por_confirmar: [
+      'Datas exatas das escrituras (o simulador guarda apenas anos)',
+      'Percentagens de propriedade de cada imóvel',
+      'Sinal já pago na compra de C e se está incluído na entrada',
+      'IMT, imposto do selo, escritura e registos reais (o simulador estima)',
+      'Imposto do selo sobre o crédito e despesas bancárias',
+      'Custos de aquisição documentados de B (escritura, IMT e selo pagos na altura)',
+      'Reserva de liquidez e montante ou percentagem a investir',
+      'IRS de A e de B confirmados pela AT',
+      'Escalões de IRS aplicáveis ao ano da venda',
+      'Campos ainda com valor predefinido: ' + (usadosPorDefeito.join(', ') || 'nenhum')
+    ]
+  };
 }
+
+function exportData() {
+  try {
+    const payload = buildExportPayload();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `simulador-habitacao-export-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    toast('Exportado');
+  } catch (e) {
+    console.error(e);
+    toast('Erro ao exportar');
+  }
+}
+
 
 function importDataPrompt() {
   const inp = document.createElement('input');
@@ -1563,7 +1819,8 @@ function importDataPrompt() {
     const r = new FileReader();
     r.onload = ev => {
       try {
-        const s = JSON.parse(ev.target.result);
+        const f0 = JSON.parse(ev.target.result);
+        const s = (f0 && f0.estado_completo_atual) ? f0.estado_completo_atual : (f0 && f0.estado_persistido_bruto) ? f0.estado_persistido_bruto : f0;
         if (s.mode) mode=s.mode;
         if (s.euriborIdx) euriborIdx=s.euriborIdx;
         if (s.regimeIRS) regimeIRS=s.regimeIRS;
@@ -1576,6 +1833,11 @@ function importDataPrompt() {
         if (s.jovemIMT!==undefined) jovemIMT=s.jovemIMT;
         if (s.aTitulares) aTitulares=s.aTitulares;
         if (s.realMode!==undefined) realMode=s.realMode;
+        if (s.showDetails!==undefined) showDetails=s.showDetails;
+        if (Array.isArray(s.zonas) && s.zonas.length) zonas=s.zonas;
+        if (s.zonaBIdx!==undefined) zonaBIdx=s.zonaBIdx;
+        if (s.zonaCIdx!==undefined) zonaCIdx=s.zonaCIdx;
+        if (s.invAnos!==undefined && $('invAnosSl')) $('invAnosSl').value=s.invAnos;
         PERSISTED_FIELDS.forEach(id => { const el=$(id); if (el && s[id]!==undefined) el.value=s[id]; });
         setMode(mode); setIndex(euriborIdx); setRegime(regimeIRS); setTitulares(titulares); setInvestMode(investMode); setReinvOpt(reinvOpt);
         setMvAStatus(mvAStatus);
@@ -1583,6 +1845,8 @@ function importDataPrompt() {
         $('toggleJovem').classList.toggle('on', jovemIMT);
         $('toggleReal').classList.toggle('on', realMode);
         updateJovemHint();
+        document.body.classList.toggle('hide-details', !showDetails);
+        if (typeof buildZonasUI === 'function') buildZonasUI();
         update(); saveState();
         toast('Importado');
       } catch { toast('Ficheiro inválido'); }
