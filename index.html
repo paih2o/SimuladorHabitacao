@@ -1598,6 +1598,12 @@ function buildExportPayload() {
 
   const campos = {};
   PERSISTED_FIELDS.forEach(id => { campos[id] = campo(id, null, id === 'invAnos' ? 'invAnosSl' : null); });
+  // O prazo é limitado automaticamente pela regra BdP/idade: se coincidir com esse limite, pode não ter sido escolhido
+  if ($('prazo') && campos.prazo.valor !== null && parseFloat($('prazo').value) === parseFloat($('prazo').max)
+      && campos.prazo.valor_predefinido_codigo > parseFloat($('prazo').max)) {
+    campos.prazo.valor = null;
+    campos.prazo.estado = 'limite_automatico_por_confirmar';
+  }
   const opcoes = {};
   Object.keys(OPCOES_PREDEFINIDAS).forEach(k => { opcoes[k] = opcao(k, estado[k]); });
 
@@ -1642,6 +1648,8 @@ function buildExportPayload() {
         introduzido_pelo_utilizador: 'valor diferente do predefinido no código; foi introduzido no simulador (pode ser real ou uma estimativa do próprio utilizador)',
         escolhido_pelo_utilizador: 'opção diferente da predefinida',
         predefinido_por_confirmar: 'igual ao valor de exemplo do código; valor fica null até confirmação',
+        limite_automatico_por_confirmar: 'valor ajustado automaticamente ao limite legal; confirmar se foi escolhido',
+        depende_de_ano_por_confirmar: 'calculado a partir de um ano ainda por confirmar',
         estimativa_simulador: 'calculado pelo simulador; não é valor fiscal definitivo',
         pressuposto: 'constante ou tabela usada no cálculo',
         nao_existe_no_simulador: 'dado pedido que o simulador não recolhe'
@@ -1691,7 +1699,7 @@ function buildExportPayload() {
         custos_aquisicao_auto: est(custAqB.total, 'EUR', 'IMT HPP + selo 0,8% + notário 600; não substitui a escritura real'),
         custos_aquisicao_documentados: naoExiste('EUR'),
         obras_documentadas: campos.vObras,
-        coeficiente_monetario: { valor: coefB, estado: 'pressuposto', nota: 'Portaria 382/2025/1' },
+        coeficiente_monetario: { valor: coefB, estado: campos.vAnoAq.estado === 'introduzido_pelo_utilizador' ? 'pressuposto' : 'depende_de_ano_por_confirmar', nota: 'Portaria 382/2025/1' },
         valor_aquisicao_corrigido: est(aqCorrB, 'EUR'),
         mais_valia: est(mvB, 'EUR'),
         base_tributavel_sem_reinvestimento: est(Math.max(0, mvB) * getTributavelMultiplier(), 'EUR'),
